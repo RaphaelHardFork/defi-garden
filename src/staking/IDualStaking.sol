@@ -5,9 +5,8 @@ pragma solidity ^0.8.13;
  * @notice  This contract allow to distribute ERC20 reward block per block
  *          to users having a staked amount of another ERC20 token.
  *
- * @dev This contract implement the {IERC900} interface.
  *
- * This implementation is used for two distinct ERC20 (rewards and staked token),
+ * @dev This implementation is used for two distinct ERC20 (rewards and staked token),
  * if only one token is used, consider using an anti-compound number of block to avoid,
  * compound on each block.
  *
@@ -19,11 +18,10 @@ pragma solidity ^0.8.13;
  * which calculate amount of rewards to distribute to each token staked in the contract.
  *
  * NOTE This contract is not audited, use it with caution.
- *      Utilisation of the {IERC900} seem not to be so relevant.
  */
 
 interface IDualStaking {
-    // --- Struct ---
+    // --- Structs ---
     /**
      * @dev information related to blocks
      *    - {depositBlock} last block where an amount was deposited in {_depositPool}
@@ -49,31 +47,45 @@ interface IDualStaking {
         uint256 amount,
         uint256 depositPool
     );
+
     event Staked(
         address indexed account,
         uint256 indexed distribtion,
         uint256 amount,
         uint256 total
     );
+
     event Unstaked(
         address indexed account,
         uint256 indexed distribtion,
         uint256 amount,
         uint256 total
     );
+
     event RewardPaid(address indexed account, uint256 amount);
 
-    // --- States to implement ---
+    // -- Errors ---
 
-    /**
-     * @dev token distributed as rewards
-     */
-    function rewardToken() external view returns (address);
+    error NoAccess(address sender);
+    error ZeroAmount();
+    error InsufficientStakedAmount();
+    error ShorterDistribution();
+    error LowerDistributionToZero();
+    error BelowMinimalRewardsDeposit();
+    error OverMaximalRewardsDeposit();
+    error DistributionOver100Years();
+
+    // --- States to implement ---
 
     /**
      * @dev token staked in the contract to get rewards
      */
     function stakedToken() external view returns (address);
+
+    /**
+     * @dev token distributed as rewards
+     */
+    function rewardToken() external view returns (address);
 
     // --- Functions ---
 
@@ -85,7 +97,7 @@ interface IDualStaking {
      *      in this case the amount is stored in {_depositPool}. The distribution will start
      *      once an user stake an amount into the contract.
      *
-     *      Considere deposit at least 10**12 token (with 18 decimal) in order to limit amount
+     *      Consider deposit at least 10**12 token (with 18 decimal) in order to limit amount
      *      of token stuck in the contract.
      *
      * Requirement:

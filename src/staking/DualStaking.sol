@@ -2,8 +2,8 @@
 
 pragma solidity ^0.8.13;
 
-import "openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
-import "openzeppelin-contracts/contracts/access/Ownable.sol";
+import "openzeppelin-contracts/token/ERC20/IERC20.sol";
+import "openzeppelin-contracts/access/Ownable.sol";
 import "./IDualStaking.sol";
 
 /**
@@ -26,6 +26,9 @@ import "./IDualStaking.sol";
  */
 
 contract DualStaking is IDualStaking, Ownable {
+    uint256 public immutable BLOCK_PER_DAY;
+    uint128 public immutable MIN_REWARDS_DEPOSIT;
+    uint128 public immutable MAX_REWARDS_DEPOSIT;
     uint256 public constant PRECISION = 10**40;
 
     address public immutable override rewardToken;
@@ -51,15 +54,18 @@ contract DualStaking is IDualStaking, Ownable {
     Timeline private _timeline;
 
     /**
-     * @dev Tokens address are `immutable`, considere using another contract
+     * @dev Tokens address are `immutable`, consider using another contract
      * to change reward or staked token.
      *
      * @param _rewardToken   token distributed as rewards
      * @param _stakedToken  token staked by users
      */
-    constructor(address _rewardToken, address _stakedToken) {
+    constructor(address _stakedToken, address _rewardToken) {
         rewardToken = _rewardToken;
         stakedToken = _stakedToken;
+        MIN_REWARDS_DEPOSIT = 5e16; // 0.05 token
+        MAX_REWARDS_DEPOSIT = 1000e27; // 1000 billons tokens
+        BLOCK_PER_DAY = 43000; // overestimation of Polygon network
     }
 
     modifier triggerDistribution() {
@@ -78,11 +84,13 @@ contract DualStaking is IDualStaking, Ownable {
         onlyOwner
         triggerDistribution
     {
-        require(
-            lastBlock >= _timeline.lastBlockWithReward &&
-                lastBlock > block.number,
-            "Staking: shorter distribution"
-        );
+        if (amount < MIN_REWARDS_DEPOSIT) revert BelowMinimalRewardsDeposit();
+        if (
+            lastBlock < block.number ||
+            lastBlock <= _timeline.lastBlockWithReward
+        ) revert ShorterDistribution();
+        if (lastBlock > (BLOCK_PER_DAY * 365) * 100)
+            revert DistributionOver100Years();
 
         // transfer token
         IERC20(rewardToken).transferFrom(msg.sender, address(this), amount);
@@ -102,6 +110,7 @@ contract DualStaking is IDualStaking, Ownable {
 
             _timeline.depositBlock = uint64(block.number);
             _timeline.lastBlockWithReward = uint64(lastBlock);
+            emit Deposit(msg.sender, 0, amount, _depositPool);
             return;
         }
 
@@ -133,6 +142,7 @@ contract DualStaking is IDualStaking, Ownable {
         triggerDistribution
         triggerRewards(account)
     {
+        if (amount == 0) revert ZeroAmount();
         uint256 rewardAmount;
         uint256 lastBlock = _timeline.lastBlockWithReward;
 
@@ -171,10 +181,11 @@ contract DualStaking is IDualStaking, Ownable {
         triggerDistribution
         triggerRewards(account)
     {
-        require(
-            msg.sender == account || msg.sender == owner(),
-            "Staking: no access"
-        );
+        if (msg.sender != account && msg.sender != owner())
+            revert NoAccess(msg.sender);
+        if (_totalStaked < amount || _stakedAmount[account] < amount)
+            revert InsufficientStakedAmount();
+
         uint256 lastBlockWithReward = _timeline.lastBlockWithReward;
         // stop distribution if no more token in contract
         if (_totalStaked - amount == 0) {
@@ -305,9 +316,10 @@ contract DualStaking is IDualStaking, Ownable {
         uint256 amount,
         uint256 staked,
         uint256 duration
-    ) internal pure returns (uint256 estimatedRBT) {
+    ) internal view returns (uint256 estimatedRBT) {
+        if (amount > MAX_REWARDS_DEPOSIT) revert OverMaximalRewardsDeposit();
         estimatedRBT = (amount * PRECISION) / (staked * duration);
-        require(estimatedRBT > 0, "Stacking: lower reward to zero");
+        if (estimatedRBT == 0) revert LowerDistributionToZero();
     }
 
     /**
