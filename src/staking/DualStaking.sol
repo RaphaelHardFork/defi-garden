@@ -29,7 +29,7 @@ contract DualStaking is IDualStaking, Ownable {
     uint256 public immutable BLOCK_PER_DAY;
     uint128 public immutable MIN_REWARDS_DEPOSIT;
     uint128 public immutable MAX_REWARDS_DEPOSIT;
-    uint256 public constant PRECISION = 10**40;
+    uint256 public constant PRECISION = 10e40;
 
     address public immutable override rewardToken;
     address public immutable stakedToken;
@@ -327,6 +327,7 @@ contract DualStaking is IDualStaking, Ownable {
      *      and if distribution is finished).
      *      Validate RBT and compare it to the previous (only for deposit)
      */
+
     function _updateRBT(
         uint256 amount,
         uint256 lastBlock,

@@ -31,27 +31,37 @@ contract DualStaking_test is BaseTest {
     /*/////////////////////////////////////
                      Utils 
     /////////////////////////////////////*/
-    function _userStake(address user, uint256 amount) internal {
+    function _prepareStake(address user, uint256 amount) internal {
         vm.assume(amount > 0 && amount <= 1000e18);
-        vm.startPrank(user);
+        vm.prank(user);
         tokens[TOKEN].approve(STAKING, amount);
-        staking.stake(amount);
-        vm.stopPrank();
+        vm.prank(user);
+        // call stake after
     }
 
-    function _deposit(uint256 amount, uint64 lastBlock) internal {
-        uint256 hundredYears = staking.BLOCK_PER_DAY() * 365 * 99;
+    function _userStake(address user, uint256 amount) internal {
+        _prepareStake(user, amount);
+        staking.stake(amount);
+    }
+
+    function _prepareDeposit(uint256 amount, uint64 lastBlock) internal {
         vm.assume(
             amount > 5e16 &&
                 amount < 1000e27 &&
                 lastBlock > 2000 &&
-                lastBlock < hundredYears
+                // 100 years
+                lastBlock < staking.BLOCK_PER_DAY() * 365 * 99
         );
         tokens[REWARDS].mint(OWNER, amount);
-        vm.startPrank(OWNER);
+        vm.prank(OWNER);
         tokens[REWARDS].approve(STAKING, amount);
+        vm.prank(OWNER);
+        // call deposit after
+    }
+
+    function _deposit(uint256 amount, uint64 lastBlock) internal {
+        _prepareDeposit(amount, lastBlock);
         staking.deposit(amount, lastBlock);
-        vm.stopPrank();
     }
 
     function _userUnstake(address user, uint256 amount) internal {
@@ -60,11 +70,11 @@ contract DualStaking_test is BaseTest {
     }
 
     function _calculRBT(
-        uint256 amount,
+        uint256 rewardAmount,
         uint256 blockRange,
         uint256 totalStaked
     ) internal pure returns (uint256) {
-        //
+        return (rewardAmount * 10e40) / (blockRange * totalStaked);
     }
 
     /*/////////////////////////////////////
@@ -89,21 +99,16 @@ contract DualStaking_test is BaseTest {
     }
 
     function testEmitOnStakeFor(uint256 amount) public {
-        vm.assume(amount > 0 && amount <= 1000e18);
-        vm.startPrank(USERS[0]);
-        tokens[TOKEN].approve(STAKING, amount);
+        _prepareStake(USERS[0], amount);
         vm.expectEmit(true, true, false, true, STAKING);
         emit Staked(USERS[0], 0, amount, amount);
         staking.stake(amount);
-        vm.stopPrank();
     }
 
     function testCannotStake() public {
-        vm.startPrank(USERS[0]);
-        tokens[TOKEN].approve(STAKING, 50e18);
+        _prepareStake(USERS[0], 50e18);
         vm.expectRevert(IDualStaking.ZeroAmount.selector);
         staking.stake(0);
-        vm.stopPrank();
     }
 
     function testMultipleStake(uint256 nbOfUser, uint256 amount) public {
@@ -154,20 +159,10 @@ contract DualStaking_test is BaseTest {
     }
 
     function testEmitOnDeposit(uint256 amount, uint64 lastBlock) public {
-        uint256 hundredYears = staking.BLOCK_PER_DAY() * 365 * 99;
-        vm.assume(
-            amount > 5e16 &&
-                amount < 1000e27 &&
-                lastBlock > 2000 &&
-                lastBlock < hundredYears
-        );
-        tokens[REWARDS].mint(OWNER, amount);
-        vm.startPrank(OWNER);
-        tokens[REWARDS].approve(STAKING, amount);
+        _prepareDeposit(amount, lastBlock);
         vm.expectEmit(true, true, false, true, STAKING);
         emit Deposit(OWNER, 0, amount, amount);
         staking.deposit(amount, lastBlock);
-        vm.stopPrank();
     }
 
     function testCannotDeposit() public {
@@ -267,40 +262,103 @@ contract DualStaking_test is BaseTest {
         assertEq(staking.depositPool(), 0);
     }
 
-    function testEmitOnStakeToActive(uint256 amount) public {
+    function testEmitOnStakeToActive(
+        uint256 amount,
+        uint64 lastBlock,
+        uint256 stakedAmount
+    ) public {
+        _deposit(amount, lastBlock);
+        vm.roll(10000);
+        _prepareStake(USERS[0], stakedAmount);
         vm.expectEmit(true, true, false, true, STAKING);
-        emit Staked(USERS[0], 123, amount, amount);
+        emit Staked(
+            USERS[0],
+            _calculRBT(amount, lastBlock - 1000, stakedAmount),
+            stakedAmount,
+            stakedAmount
+        );
+        staking.stake(stakedAmount);
+    }
+
+    /*/////////////////////////////////////
+        deposit::to active distribution 
+    /////////////////////////////////////*/
+    function testDepositToActive(uint256 depositedAmount, uint64 lastBlock)
+        public
+    {
+        vm.assume(lastBlock > 10000);
+        _userStake(USERS[0], 50e18);
+        vm.roll(10000);
+
+        // deposit
+        _deposit(depositedAmount, lastBlock);
+
+        assertEq(staking.timeline().depositBlock, 0); // no deposit block
+        assertEq(staking.timeline().lastBlockWithReward, lastBlock);
+        assertEq(staking.timeline().lastDistributionBlock, 10000);
+        assertTrue(staking.currentReward() > 0);
+        assertEq(staking.depositPool(), 0);
+    }
+
+    function testEmitOnDepositToActive(
+        uint256 depositedAmount,
+        uint64 lastBlock
+    ) public {
+        vm.assume(lastBlock > 10000);
+        _userStake(USERS[0], 50e18);
+        vm.roll(10000);
+
+        _prepareDeposit(depositedAmount, lastBlock);
+        vm.expectEmit(true, true, false, true, STAKING);
+        emit Deposit(
+            OWNER,
+            _calculRBT(depositedAmount, lastBlock - 10000, 50e18),
+            depositedAmount,
+            0
+        );
+        staking.deposit(depositedAmount, lastBlock);
+    }
+
+    /*/////////////////////////////////////
+        deposit::when distribution active
+    /////////////////////////////////////*/
+
+    function testDepositWhenDistributionActive(uint256 amount, uint64 lastBlock)
+        public
+    {
+        vm.assume(lastBlock > 500_001);
+        _userStake(USERS[0], 50e18);
+        _deposit(2000e18, 500_000);
+        uint256 remainingBlocks = 500_000 - block.number;
+        uint256 currentRBT = _calculRBT(2000e18, remainingBlocks, 50e18);
+        assertEq(staking.currentReward(), currentRBT, "current RBT");
+
+        vm.roll(100_000);
+        remainingBlocks = 500_000 - block.number;
+        uint256 remain = (currentRBT * 50e18 * remainingBlocks) / 10e40;
+
+        _prepareDeposit(amount, lastBlock);
+        // handle overflow here or use prepare deposit
+        uint256 newRBT = _calculRBT(
+            remain + amount,
+            lastBlock - block.number,
+            50e18
+        );
+        vm.assume(newRBT >= currentRBT);
+        _deposit(amount, lastBlock); // handle overflow /!\
+        // complex test => need clear context preparation (setDistribution)
+
+        // deposit should distribute rewards
+        assertEq(staking.timeline().lastDistributionBlock, 100_000);
+        assertEq(staking.timeline().lastBlockWithReward, lastBlock);
+
+        // blockRange = 399_000
+        assertEq(staking.currentReward(), newRBT);
+        // update RBT
+        // not lower rewards
+        // emit Deposit
     }
 }
-
-//     // --- active distribution ---
-//     function testActiveWithDeposit(uint256 amount) public {
-//         _userStake(USER1, amount);
-//         vm.roll(2000);
-//         _deposit(amount * 2, 30000);
-
-//         assertEq(staking.timeline().lastBlockWithReward, 30000);
-//         assertEq(staking.timeline().depositBlock, 0, "deposit block");
-//         assertEq(staking.timeline().lastDistributionBlock, 2000);
-//         assertEq(
-//             staking.currentReward(),
-//             _calculRBT(amount * 2, 30000 - 2000, amount)
-//         );
-//         assertEq(staking.depositPool(), 0);
-//     }
-
-//     function testActiveWithStake(uint256 amount) public {
-//         _deposit(amount, 30000);
-//         vm.roll(2000);
-//         _userStake(USER1, amount * 2);
-
-//         assertEq(staking.timeline().lastBlockWithReward, 30000 + 1000);
-//         assertEq(staking.timeline().lastDistributionBlock, 2000);
-//         assertEq(
-//             staking.currentReward(),
-//             _calculRBT(amount, 31000 - 2000, amount * 2)
-//         );
-//     }
 
 //     // --- with active distribution ---
 //     function testDepositWhenActive(uint256 staked, uint256 amount) public {
