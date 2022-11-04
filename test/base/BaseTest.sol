@@ -54,4 +54,13 @@ abstract contract BaseTest is Test {
             t.mint(USERS[i], amount);
         }
     }
+
+    function _mintFor(
+        address user,
+        uint256 amount,
+        uint256 tokenIndex
+    ) internal {
+        Token t = tokens[tokenIndex];
+        t.mint(user, amount);
+    }
 }

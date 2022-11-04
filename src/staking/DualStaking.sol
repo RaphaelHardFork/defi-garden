@@ -127,7 +127,7 @@ contract DualStaking is IDualStaking, Ownable {
         // this check is not performed when RBT = 0
         uint256 currentRBT = _currentRewardPerBlockPerToken;
         uint256 updatedRBT = _updateRBT(amount, lastBlock, 0);
-        require(updatedRBT >= currentRBT, "Staking: lower rewards");
+        if (updatedRBT < currentRBT) revert LowerDistribution();
 
         emit Deposit(msg.sender, updatedRBT, amount, _depositPool);
     }

@@ -69,6 +69,15 @@ contract DualStaking_test is BaseTest {
         staking.unstake(amount);
     }
 
+    function _setDistribution(
+        uint256 amount,
+        uint64 lastBlock,
+        uint256 stakedAmount
+    ) internal {
+        _deposit(amount, lastBlock);
+        _userStake(USERS[0], stakedAmount);
+    }
+
     function _calculRBT(
         uint256 rewardAmount,
         uint256 blockRange,
@@ -322,13 +331,8 @@ contract DualStaking_test is BaseTest {
     /*/////////////////////////////////////
         deposit::when distribution active
     /////////////////////////////////////*/
-
-    function testDepositWhenDistributionActive(uint256 amount, uint64 lastBlock)
-        public
-    {
-        vm.assume(lastBlock > 500_001);
-        _userStake(USERS[0], 50e18);
-        _deposit(2000e18, 500_000);
+    function testDepositWhenDistributionActive() public {
+        _setDistribution(2000e18, 500_000, 50e18);
         uint256 remainingBlocks = 500_000 - block.number;
         uint256 currentRBT = _calculRBT(2000e18, remainingBlocks, 50e18);
         assertEq(staking.currentReward(), currentRBT, "current RBT");
@@ -337,191 +341,152 @@ contract DualStaking_test is BaseTest {
         remainingBlocks = 500_000 - block.number;
         uint256 remain = (currentRBT * 50e18 * remainingBlocks) / 10e40;
 
-        _prepareDeposit(amount, lastBlock);
-        // handle overflow here or use prepare deposit
-        uint256 newRBT = _calculRBT(
-            remain + amount,
-            lastBlock - block.number,
-            50e18
-        );
-        vm.assume(newRBT >= currentRBT);
-        _deposit(amount, lastBlock); // handle overflow /!\
-        // complex test => need clear context preparation (setDistribution)
+        _deposit(50000e18, 900_000);
 
-        // deposit should distribute rewards
         assertEq(staking.timeline().lastDistributionBlock, 100_000);
-        assertEq(staking.timeline().lastBlockWithReward, lastBlock);
+        assertEq(staking.timeline().lastBlockWithReward, 900_000);
 
-        // blockRange = 399_000
-        assertEq(staking.currentReward(), newRBT);
-        // update RBT
-        // not lower rewards
-        // emit Deposit
+        assertEq(
+            staking.currentReward(),
+            _calculRBT(remain + 50000e18, 800_000, 50e18)
+        );
     }
+
+    function testCannotDepositWhenDistributionActive() public {
+        _setDistribution(2000e18, 500_000, 999e18);
+        vm.roll(499_000);
+        uint64 maxLastBlock = uint64(staking.BLOCK_PER_DAY() * 365 * 98);
+        _prepareDeposit(1e17, maxLastBlock);
+        vm.expectRevert(IDualStaking.LowerDistribution.selector);
+        staking.deposit(1e17, maxLastBlock);
+    }
+
+    /*/////////////////////////////////////
+        stake::when distribution active
+    /////////////////////////////////////*/
+    function testStakeWhenDistributionActive() public {
+        _setDistribution(2000e18, 500_000, 999e18);
+        vm.roll(250_000);
+
+        uint256 currentRBT = _calculRBT(2000e18, 499_000, 999e18);
+        assertEq(staking.currentReward(), currentRBT);
+
+        _userStake(USERS[1], 50e18);
+
+        uint256 remain = (currentRBT * 999e18 * (500_000 - block.number)) /
+            10e40;
+
+        currentRBT = _calculRBT(remain, 500_000 - block.number, 999e18 + 50e18);
+        assertEq(staking.currentReward(), currentRBT);
+
+        assertEq(staking.timeline().lastDistributionBlock, 250_000);
+    }
+
+    function testCannotStakeWhenDistributionActive() public {
+        _setDistribution(2000e18, 500_000, 999e18);
+        vm.roll(499_000);
+
+        // stake a lot
+        _mintFor(USERS[1], 10e60, TOKEN);
+        vm.startPrank(USERS[1]);
+        tokens[TOKEN].approve(STAKING, 10e60);
+        vm.expectRevert(IDualStaking.LowerDistributionToZero.selector);
+        staking.stake(10e60);
+    }
+
+    /*/////////////////////////////////////
+                 unstake()
+    /////////////////////////////////////*/
+    function testIncreaseRewardWhenUnstake() public {
+        _userStake(USERS[0], 500e18);
+        _userStake(USERS[1], 50e18);
+        _userStake(USERS[2], 700e18);
+        _userStake(USERS[3], 70e18);
+        _userStake(USERS[4], 15e18);
+        _deposit(50_000e18, uint64(staking.BLOCK_PER_DAY() * 365));
+
+        vm.roll(1_000_000);
+        uint256 currentRBT = staking.currentReward();
+
+        for (uint256 i; i < 4; i++) {
+            _userUnstake(USERS[i], staking.totalStakedFor(USERS[i]));
+            assertGt(staking.currentReward(), currentRBT);
+            currentRBT = staking.currentReward();
+        }
+    }
+
+    function testUnstakeAllBeforeEnd() public {
+        _userStake(USERS[0], 500e18);
+        _userStake(USERS[1], 50e18);
+        _userStake(USERS[2], 700e18);
+        _userStake(USERS[3], 70e18);
+        _userStake(USERS[4], 15e18);
+        _deposit(50_000e18, uint64(staking.BLOCK_PER_DAY() * 365));
+
+        vm.roll(1_000_000);
+
+        uint256 remain = (staking.currentReward() *
+            (staking.timeline().lastBlockWithReward - block.number) *
+            staking.totalStaked()) / 10e40;
+
+        for (uint256 i; i <= 4; i++) {
+            _userUnstake(USERS[i], staking.totalStakedFor(USERS[i]));
+        }
+
+        assertEq(staking.currentReward(), 0);
+        assertEq(staking.timeline().depositBlock, block.number);
+        assertApproxEqAbs(staking.depositPool(), remain, 10);
+    }
+
+    function testResumeWhenStake() public {
+        _userStake(USERS[0], 500e18);
+        _userStake(USERS[1], 50e18);
+        _userStake(USERS[2], 700e18);
+        _userStake(USERS[3], 70e18);
+        _userStake(USERS[4], 15e18);
+        _deposit(50_000e18, uint64(staking.BLOCK_PER_DAY() * 365));
+
+        vm.roll(1_000_000);
+        for (uint256 i; i <= 4; i++) {
+            _userUnstake(USERS[i], staking.totalStakedFor(USERS[i]));
+        }
+
+        assertEq(staking.timeline().depositBlock, block.number, "1. db");
+        assertEq(
+            staking.timeline().lastBlockWithReward,
+            uint64(staking.BLOCK_PER_DAY() * 365),
+            "1. lbwr"
+        );
+        assertEq(
+            staking.timeline().lastDistributionBlock,
+            block.number,
+            "1. ldb"
+        );
+
+        vm.roll(1_250_000);
+
+        _userStake(USERS[2], 50e18);
+        assertEq(staking.timeline().depositBlock, 1_000_000, "2. db");
+        assertEq(
+            staking.timeline().lastBlockWithReward,
+            uint64(staking.BLOCK_PER_DAY() * 365) + 250_000,
+            "2. lbwr"
+        );
+        assertEq(
+            staking.timeline().lastDistributionBlock,
+            block.number,
+            "2. ldb"
+        );
+    }
+
+    /*/////////////////////////////////////
+                rewards distribution
+    /////////////////////////////////////*/
+
+    /*/////////////////////////////////////
+                APY/APR
+    /////////////////////////////////////*/
 }
-
-//     // --- with active distribution ---
-//     function testDepositWhenActive(uint256 staked, uint256 amount) public {
-//         vm.assume(staked > 1 * D18);
-//         vm.assume(amount > 1 * D18);
-//         uint256 totalStaked = (staked / 2) + (staked / 10);
-//         _userStake(USER1, (staked / 2));
-//         _userStake(USER2, staked / 10);
-//         _deposit(amount, 45000);
-
-//         assertEq(
-//             staking.currentReward(),
-//             _calculRBT(amount, 45000 - 1000, totalStaked)
-//         );
-
-//         uint256 remain = (staking.currentReward() * 10000 * totalStaked) /
-//             10**40;
-
-//         vm.roll(35000);
-//         _deposit(amount, 70000); // distribute reward
-
-//         assertEq(rewards.balanceOf(address(staking)), amount * 2);
-//         assertEq(staking.timeline().lastBlockWithReward, 70000);
-//         assertEq(staking.timeline().depositBlock, 0);
-//         assertEq(staking.timeline().lastDistributionBlock, 35000);
-//         assertEq(
-//             staking.currentReward(),
-//             _calculRBT(amount + remain, 70000 - 35000, totalStaked)
-//         );
-//         assertEq(staking.depositPool(), 0);
-//     }
-
-//     function testStakeWhenActive() public {
-//         uint256 deposit = 10000 * D18;
-//         uint256 staked = 50 * D18;
-
-//         // init (block 1000)
-//         _userStake(USER1, staked);
-//         _deposit(deposit, 70000);
-
-//         // check init
-//         uint256 rbt = _calculRBT(deposit, 69000, staked);
-//         assertEq(rewards.balanceOf(address(staking)), deposit);
-//         assertEq(token.balanceOf(address(staking)), staked);
-//         assertEq(staking.currentReward(), rbt, "rbt 0");
-
-//         // new stake
-//         vm.roll(25000);
-//         _userStake(USER1, staked);
-
-//         // check new stake
-//         uint256 expectedReward = (rbt * staked * 24000) / 10**40;
-//         assertEq(token.balanceOf(address(staking)), staked * 2);
-//         assertEq(rewards.balanceOf(USER1), expectedReward, "User reward");
-//         uint256 remainingAmount = (rbt * 45000 * staked) / 10**40;
-//         assertApproxEqAbs(
-//             rewards.balanceOf(address(staking)),
-//             remainingAmount,
-//             10,
-//             "Contract reward"
-//         );
-//         assertGt(rbt, staking.currentReward());
-//         rbt = _calculRBT(remainingAmount, 45000, staked * 2);
-//         assertEq(staking.currentReward(), rbt, "New RBT");
-
-//         // new stake
-//         vm.roll(65000);
-//         _userStake(USER1, staked);
-
-//         // check new stake
-//         expectedReward += (rbt * (staked * 2) * 40000) / 10**40;
-//         assertEq(token.balanceOf(address(staking)), staked * 3);
-//         assertEq(rewards.balanceOf(USER1), expectedReward, "User reward");
-//         remainingAmount = (rbt * 5000 * staked * 2) / 10**40;
-//         assertApproxEqAbs(
-//             rewards.balanceOf(address(staking)),
-//             remainingAmount,
-//             10,
-//             "Contract reward"
-//         );
-//         assertGt(rbt, staking.currentReward());
-//         rbt = _calculRBT(remainingAmount, 5000, staked * 3);
-//         assertEq(staking.currentReward(), rbt, "New RBT");
-
-//         // new stake after distribution
-//         vm.roll(75000);
-//         _userStake(USER1, staked);
-
-//         assertEq(token.balanceOf(address(staking)), staked * 4);
-//         assertApproxEqAbs(
-//             rewards.balanceOf(address(staking)),
-//             0,
-//             10,
-//             "Contract reward"
-//         );
-//         assertApproxEqAbs(
-//             rewards.balanceOf(USER1),
-//             deposit,
-//             10,
-//             "User rewards"
-//         );
-//         assertEq(staking.currentReward(), 0, "End RBT");
-//     }
-
-//     function testUnstakeWhenActive() public {
-//         uint256 deposit = 10000 * D18;
-//         uint256 staked = 10 * D18;
-//         _deposit(deposit, 70000);
-//         _userStake(USER1, staked);
-//         uint256 rbt = staking.currentReward();
-
-//         vm.roll(21000);
-//         _userUnstake(USER1, staked / 2);
-
-//         assertEq(token.balanceOf(address(staking)), staked / 2);
-//         assertGt(staking.currentReward(), rbt);
-//         uint256 reward = (rbt * 20000 * staked) / 10**40;
-//         assertEq(rewards.balanceOf(USER1), reward);
-//         assertEq(rewards.balanceOf(address(staking)), deposit - reward);
-//     }
-
-//     function testUnstakeAllBeforeEnd() public {
-//         uint256 deposit = 10000 * D18;
-//         uint256 staked = 10 * D18;
-//         _deposit(deposit, 70000);
-//         _userStake(USER1, staked);
-
-//         uint256 reward = (staking.currentReward() * 20000 * staked) / 10**40;
-
-//         vm.roll(21000);
-//         _userUnstake(USER1, staked);
-
-//         assertEq(token.balanceOf(address(staking)), 0);
-//         assertEq(staking.currentReward(), 0);
-//         assertApproxEqAbs(staking.depositPool(), deposit - reward, 10);
-//         assertEq(rewards.balanceOf(USER1), reward);
-//         assertEq(rewards.balanceOf(address(staking)), deposit - reward);
-//         assertEq(staking.timeline().lastBlockWithReward, 70000);
-//         assertEq(staking.timeline().depositBlock, 21000);
-//         assertEq(staking.timeline().lastDistributionBlock, 21000);
-//     }
-
-//     function testStakingInPause() public {
-//         uint256 deposit = 10000 * D18;
-//         uint256 staked = 10 * D18;
-//         _deposit(deposit, 70000);
-//         _userStake(USER1, staked);
-
-//         uint256 rbt = staking.currentReward();
-
-//         // put contract in pause
-//         vm.roll(21000);
-//         _userUnstake(USER1, staked);
-
-//         // reactivate staking
-//         vm.roll(100000);
-//         _userStake(USER1, staked);
-
-//         assertEq(staking.timeline().depositBlock, 21000);
-//         assertEq(staking.timeline().lastBlockWithReward, 100000 + 49000);
-//         assertEq(staking.timeline().lastDistributionBlock, 100000);
-//         assertApproxEqAbs(rbt, staking.currentReward(), 100000000000000000);
-//     }
 
 //     // --- get rewards ---
 //     function testGetReward(uint256 amount) public {
@@ -690,55 +655,3 @@ contract DualStaking_test is BaseTest {
 
 //         assertTrue(rewards.balanceOf(OWNER) != 0);
 //     }
-
-//     /**
-//      *      ###########################################
-//      *      #                                         #
-//      *      #                   UTILS                 #
-//      *      #                                         #
-//      *      ###########################################
-//      * */
-
-//     function _userUnstake(address user, uint256 amount) internal {
-//         vm.assume(amount > 0);
-//         vm.startPrank(user);
-//         staking.unstake(amount);
-//         vm.stopPrank();
-//     }
-
-//     function _deposit(uint256 amount, uint64 lastBlock) internal {
-//         vm.assume(amount > 0);
-//         _mintTo(rewards, OWNER, amount);
-//         vm.startPrank(OWNER);
-//         rewards.approve(address(staking), amount);
-//         staking.deposit(amount, lastBlock);
-//         vm.stopPrank();
-//     }
-
-//     function _calculRBT(
-//         uint256 amount,
-//         uint256 blockRange,
-//         uint256 totalStaked
-//     ) internal pure returns (uint256) {
-//         return (amount * 10**40) / (blockRange * totalStaked);
-//     }
-
-//     function _calculReward(
-//         uint256 rbt,
-//         uint256 elapsedBlocks,
-//         uint256 staked
-//     ) internal returns (uint256) {
-//         (bool flag, uint256 params) = elapsedBlocks.tryMul(staked);
-//         if (!flag) {
-//             emit log_string("Overflow on reward calcul (1)");
-//         }
-
-//         (flag, params) = params.tryMul(rbt);
-//         if (!flag) {
-//             emit log_string("Overflow on reward calcul (2)");
-//         }
-
-//         emit log_uint(params);
-//         return params / 10**40;
-//     }
-// }

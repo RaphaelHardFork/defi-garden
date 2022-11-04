@@ -70,6 +70,7 @@ interface IDualStaking {
     error ZeroAmount();
     error InsufficientStakedAmount();
     error ShorterDistribution();
+    error LowerDistribution();
     error LowerDistributionToZero();
     error BelowMinimalRewardsDeposit();
     error OverMaximalRewardsDeposit();
